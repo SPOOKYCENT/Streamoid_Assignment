@@ -6,7 +6,7 @@ import pandas as pd
 from fastapi import FastAPI, Depends, status, UploadFile, HTTPException, Request
 from sqlmodel import Field, Session, SQLModel, create_engine, select, delete
 from sqlalchemy.exc import IntegrityError
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ValidationError, model_validator
 
 
 # region Models
@@ -19,7 +19,7 @@ class Product(SQLModel, table=True):
     size: str | None = Field(index=True)
     mrp: float = Field(ge=0, description="mrp must be greater than zero")
     price: float = Field(ge=0, description="price must be greater than zero")
-    quantity: int | None = Field(default=0, ge=0, description="Quantity must not be negative")
+    quantity: int | None = Field(None, ge=0, description="Quantity must not be negative")
 
     @model_validator(mode="after")
     def validate_product(self) -> "Product":
@@ -118,6 +118,7 @@ def upload_file(file: UploadFile, session: Session = Depends(get_db)):
                 price = float(row["price"]),
                 quantity = int(row["quantity"]) if not pd.isna(row.get("quantity", 0)) else None
             )
+            product = Product.model_validate(product)
             session.add(product)
             session.flush()
             inserted += 1
