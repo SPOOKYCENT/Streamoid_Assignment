@@ -31,7 +31,7 @@ This project aims to provide a lightweight and user-friendly tool that helps bus
 - Run this command in the terminal:
 
   ```bash
-      docker build -t [image_name]
+      docker build -t [image_name] .
   ```
 
 - This creates a container image with all the required dependencies.
@@ -41,7 +41,7 @@ This project aims to provide a lightweight and user-friendly tool that helps bus
 - Start the backend using docker:
 
   ```bash
-      docker run -p 8000:8000 [image-name]
+      docker run -p 8000:8000 [container-name] [image-name]
   ```
 
 - You can now access the backend service at http://localhost:8000
