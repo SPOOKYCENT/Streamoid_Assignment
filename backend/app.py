@@ -5,13 +5,14 @@ from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 import pandas as pd
 from fastapi import FastAPI, Depends, status, UploadFile, HTTPException, Request
 from sqlmodel import Field, Session, SQLModel, create_engine, select, delete
-from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
+from pydantic import BaseModel, model_validator
 
 
 # region Models
 
 class Product(SQLModel, table=True):
-    sku: str = Field(primary_key=True)
+    sku: str = Field(primary_key=True, unique=True)
     name: str = Field(index=True)
     brand: str = Field(index=True)
     color: str | None = Field(index=True)
@@ -19,6 +20,12 @@ class Product(SQLModel, table=True):
     mrp: float = Field(ge=0, description="mrp must be greater than zero")
     price: float = Field(ge=0, description="price must be greater than zero")
     quantity: int | None = Field(default=0, ge=0, description="Quantity must not be negative")
+
+    @model_validator(mode="after")
+    def validate_product(self) -> "Product":
+        if self.mrp < self.price:
+            raise ValueError("Price can not be greater than mrp.")
+        return self
 
 # endregion
 
@@ -52,19 +59,6 @@ class ValidationResult(TypedDict):
     data: Product
     message: str | None
     is_valid: bool
-
-def validate_product(product: Product) -> ValidationResult:
-    if (not product.sku):
-        return ValidationResult(data=product, message="SKU is a required field.", is_valid=False)
-    if (not product.name):
-        return ValidationResult(data=product, message="Name is a required field.", is_valid=False)
-    if (not product.brand):
-        return ValidationResult(data=product, message="Brand is a required field.", is_valid=False)
-    if (product.mrp < product.price):
-        return ValidationResult(data=product, message="Price can not be greater than mrp.", is_valid=False)
-    if (product.quantity < 0):
-        return ValidationResult(data=product, message="Quantity can not be negative.", is_valid=False)
-    return ValidationResult(data=product, message="Data uploaded successfully", is_valid=True)
 # endregion
 
 # region Main
@@ -75,16 +69,17 @@ class ProductResponse(BaseModel):
     count: int
     results: list[Product]
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Creating database and tables...")
     create_db_and_tables()
     yield
     print("Shutting down...")
-    print("Clearing database...")
-    with Session(engine) as session:
-        clear_db(session)
-    print("Database cleared.\n")
+    # print("Clearing database...")
+    # with Session(engine) as session:
+    #     clear_db(session)
+    # print("Database cleared.\n")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -109,34 +104,40 @@ def upload_file(file: UploadFile, session: Session = Depends(get_db)):
         raise HTTPException(status_code=422, detail=f"Missing required columns: {required_columns - set(df.columns)}")
     
     inserted, skipped = 0, 0
+    failed = []
+
     for _, row in df.iterrows():
-        product = Product(
-            sku = str(row["sku"]),
-            name = str(row["name"]),
-            brand = str(row["brand"]),
-            color = str(row["color"]) if not pd.isna(row.get("color", None)) else None,
-            size = str(row["size"]) if not pd.isna(row.get("size", None)) else None,
-            mrp = float(row["mrp"]),
-            price = float(row["price"]),
-            quantity = int(row["quantity"]) if not pd.isna(row.get("quantity", 0)) else None
-        )
-
-        result = validate_product(product)
-        if not result["is_valid"]:
+        try:
+            product = Product(
+                sku = str(row["sku"]),
+                name = str(row["name"]),
+                brand = str(row["brand"]),
+                color = str(row["color"]) if not pd.isna(row.get("color", None)) else None,
+                size = str(row["size"]) if not pd.isna(row.get("size", None)) else None,
+                mrp = float(row["mrp"]),
+                price = float(row["price"]),
+                quantity = int(row["quantity"]) if not pd.isna(row.get("quantity", 0)) else None
+            )
+            session.add(product)
+            session.flush()
+            inserted += 1
+        except IntegrityError as e:
+            session.rollback()
+            failed.append({"row": row.to_dict(), "error": "Duplicate SKU"})
             skipped += 1
-            continue
-
-        existing = session.get(Product, product.sku)
-        if existing:
+        except Exception as e:
+            session.rollback()
+            failed.append({"row": row.to_dict(), "error": str(e)})
             skipped += 1
-            continue
 
-        session.add(product)
-        inserted += 1
+    try:
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-    session.commit()
-
-    return {"message": f"File {filename} processed.", "inserted": inserted, "skipped": skipped}
+    # return {"message": f"File {filename} processed.", "inserted": inserted, "skipped": skipped}
+    return {"stored": inserted, "failed": failed}
 
 @app.post("/clear_db", status_code=status.HTTP_200_OK)
 def clear_database(session: Session = Depends(get_db)):
@@ -174,7 +175,8 @@ def get_products(request: Request, limit: int = 10, page: int = 1, session: Sess
         previous_parsed = parsed._replace(query=previous_query)
         previous_page = urlunparse(previous_parsed)
 
-    return ProductResponse(previous=previous_page, next=next_page, count=count, results=products)
+    # return ProductResponse(previous=previous_page, next=next_page, count=count, results=products)
+    return products
 
 @app.get("/products/search")
 def get_products_with_search(request: Request, brand: str | None = None, color: str | None = None, minPrice: float | None = None, maxPrice: float | None = None, limit: int = 10, page: int = 1, session: Session = Depends(get_db)):
@@ -216,6 +218,7 @@ def get_products_with_search(request: Request, brand: str | None = None, color: 
         previous_parsed = parsed._replace(query=previous_query)
         previous_page = urlunparse(previous_parsed)
 
-    return ProductResponse(previous=previous_page, next=next_page, count=count, results=products)
+    # return ProductResponse(previous=previous_page, next=next_page, count=count, results=products)
+    return products
 
 # endregion
